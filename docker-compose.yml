@@ -1,0 +1,56 @@
+# Full local stack: Postgres + API + worker + frontend (nginx playing the role of CloudFront).
+#   docker compose up --build      ->  http://localhost:8080
+# Notifications run in "log" mode: SMS/email are written to the admin Notification log instead
+# of being sent, and events go straight to the worker instead of SNS -> SQS.
+x-backend-env: &backend-env
+  NODE_ENV: development
+  DATABASE_URL: postgres://raktsetu:raktsetu@db:5432/raktsetu
+  JWT_SECRET: local-dev-secret-that-is-at-least-32-chars
+  NOTIFY_MODE: log
+  PUBLIC_BASE_URL: http://localhost:8080
+  LOCAL_WORKER_URL: http://worker:8080
+  TASK_SECRET: local-task-secret
+  ADMIN_EMAIL: admin@raktsetu.local
+  ADMIN_PASSWORD: admin12345
+  LOG_LEVEL: info
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: raktsetu
+      POSTGRES_PASSWORD: raktsetu
+      POSTGRES_DB: raktsetu
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raktsetu"]
+      interval: 3s
+      retries: 20
+
+  api:
+    build: ./backend
+    image: raktsetu-backend:local
+    command: ["node", "src/server.js"]
+    environment:
+      <<: *backend-env
+      SEED_DEMO: "true"
+    depends_on:
+      db: { condition: service_healthy }
+
+  worker:
+    image: raktsetu-backend:local
+    command: ["node", "src/worker.js"]
+    environment:
+      <<: *backend-env
+      LOCAL_CRON: "true"
+    depends_on:
+      api: { condition: service_healthy }
+
+  web:
+    build: ./frontend
+    ports: ["8080:80"]
+    depends_on: [api]
+
+volumes:
+  pgdata:

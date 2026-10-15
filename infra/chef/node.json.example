@@ -1,0 +1,14 @@
+{
+  "raktsetu": {
+    "repo_url": "https://github.com/your-username/raktsetu.git",
+    "branch": "main",
+    "aws_region": "ap-south-1",
+    "ecr_repo_uri": "123456789012.dkr.ecr.ap-south-1.amazonaws.com/raktsetu",
+    "eb_app": "raktsetu",
+    "eb_web_env": "raktsetu-web",
+    "eb_worker_env": "raktsetu-worker",
+    "auto_deploy": true,
+    "poll_interval": "5min"
+  },
+  "run_list": ["recipe[raktsetu_ci]"]
+}

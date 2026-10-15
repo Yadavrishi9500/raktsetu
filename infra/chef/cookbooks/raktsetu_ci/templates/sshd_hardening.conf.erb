@@ -1,0 +1,8 @@
+# Managed by Chef (raktsetu_ci::base). Local edits are reverted on the next converge.
+PermitRootLogin <%= @ssh['permit_root_login'] %>
+PasswordAuthentication <%= @ssh['password_authentication'] %>
+KbdInteractiveAuthentication no
+MaxAuthTries <%= @ssh['max_auth_tries'] %>
+X11Forwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 2

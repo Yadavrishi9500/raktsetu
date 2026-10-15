@@ -1,0 +1,10 @@
+# Managed by Chef (raktsetu_ci::base)
+<%= @log_dir %>/*.log {
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  create 0644 <%= @user %> <%= @user %>
+}

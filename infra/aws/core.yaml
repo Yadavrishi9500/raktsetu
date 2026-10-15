@@ -1,0 +1,239 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  RaktSetu core infrastructure - ECR, SNS (events, donor email, admin), SQS worker queue + DLQ,
+  RDS PostgreSQL, IAM roles for Beanstalk and the Chef-managed CI node. Uses the default VPC.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: raktsetu
+  AdminEmail:
+    Type: String
+    Description: Receives "request still short" and "hospital awaiting verification" alerts via SNS.
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    AllowedPattern: '[A-Za-z0-9]+'
+    ConstraintDescription: 12+ letters and digits
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+  DbEngineVersion:
+    Type: String
+    Default: '16.9'
+    Description: Check current versions with `aws rds describe-db-engine-versions --engine postgres --query "DBEngineVersions[].EngineVersion"`
+
+Resources:
+  # ---------- container registry ----------
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref AppName
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"keep last 20 images",
+            "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":20},
+            "action":{"type":"expire"}}]}
+
+  # ---------- SNS ----------
+  EventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AppName}-events
+      DisplayName: RaktSetu domain events
+  DonorEmailTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AppName}-donor-email
+      DisplayName: RaktSetu
+  AdminTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AppName}-admin
+      DisplayName: RaktSetu Admin
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AdminEmail
+
+  # ---------- SQS (fed by SNS, drained by the Beanstalk worker) ----------
+  WorkerDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${AppName}-worker-dlq
+      MessageRetentionPeriod: 1209600
+  WorkerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${AppName}-worker
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt WorkerDeadLetterQueue.Arn
+        maxReceiveCount: 5
+  WorkerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref WorkerQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt WorkerQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref EventsTopic }
+  EventsToWorker:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref EventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt WorkerQueue.Arn
+      RawMessageDelivery: true
+
+  # ---------- network + database ----------
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Attached to Beanstalk instances; grants database access
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RaktSetu PostgreSQL
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !GetAtt AppSecurityGroup.GroupId
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub ${AppName}-db
+      Engine: postgres
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: '20'
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: !Ref AppName
+      MasterUsername: !Ref AppName
+      MasterUserPassword: !Ref DbPassword
+      PubliclyAccessible: false
+      VPCSecurityGroups: [!GetAtt DbSecurityGroup.GroupId]
+      BackupRetentionPeriod: 1
+      AutoMinorVersionUpgrade: true
+
+  # ---------- IAM: Beanstalk ----------
+  BeanstalkServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: elasticbeanstalk.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: raktsetu-notifications
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: [!Ref EventsTopic, !Ref DonorEmailTopic, !Ref AdminTopic]
+              - Sid: DirectSmsToPhoneNumbers
+                Effect: Allow
+                Action: sns:Publish
+                NotResource: 'arn:aws:sns:*:*:*'
+              - Effect: Allow
+                Action: [sns:Subscribe, sns:Unsubscribe]
+                Resource: '*'
+                Condition:
+                  StringEquals: { sns:Protocol: email }
+              - Effect: Allow
+                Action: sns:Unsubscribe
+                Resource: '*'
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # ---------- IAM: Chef-managed CI node ----------
+  CiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: raktsetu-ecr-push
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !GetAtt Repository.Arn
+  CiInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref CiRole]
+
+Outputs:
+  EcrRepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+  EventsTopicArn:
+    Value: !Ref EventsTopic
+  DonorEmailTopicArn:
+    Value: !Ref DonorEmailTopic
+  AdminTopicArn:
+    Value: !Ref AdminTopic
+  WorkerQueueUrl:
+    Value: !Ref WorkerQueue
+  WorkerDeadLetterQueueUrl:
+    Value: !Ref WorkerDeadLetterQueue
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  AppSecurityGroupId:
+    Value: !GetAtt AppSecurityGroup.GroupId
+  InstanceProfileName:
+    Value: !Ref InstanceProfile
+  ServiceRoleArn:
+    Value: !GetAtt BeanstalkServiceRole.Arn
+  CiInstanceProfileName:
+    Value: !Ref CiInstanceProfile

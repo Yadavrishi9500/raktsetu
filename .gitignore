@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+*.zip
+.DS_Store
+infra/chef/nodes/
+infra/chef/local-mode-cache/

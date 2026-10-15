@@ -1,0 +1,6 @@
+# Beanstalk worker periodic tasks (leader-elected: runs on one instance only).
+version: 1
+cron:
+  - name: "escalate-blood-requests"
+    url: "/tasks/escalate"
+    schedule: "*/2 * * * *"

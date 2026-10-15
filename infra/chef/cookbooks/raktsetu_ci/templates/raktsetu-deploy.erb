@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Managed by Chef (raktsetu_ci::deploy).
+# Deploys the latest commit on $BRANCH if it has not been deployed yet.
+#   raktsetu-deploy           deploy only if there is a new commit (what the timer runs)
+#   raktsetu-deploy --force   rebuild and redeploy the current head
+set -euo pipefail
+
+exec 9>/tmp/raktsetu-deploy.lock
+flock -n 9 || { echo "A deploy is already running"; exit 0; }
+
+set -a; . /etc/raktsetu/deploy.env; set +a
+SRC=<%= @src %>
+LOG=<%= @log_dir %>/deploy.log
+STATE=<%= @state_dir %>/last-deployed
+FORCE=0; [ "${1:-}" = "--force" ] && FORCE=1
+
+cd "$SRC"
+git fetch --quiet origin "$BRANCH"
+REMOTE=$(git rev-parse "origin/$BRANCH")
+LAST=$(cat "$STATE" 2>/dev/null || true)
+
+if [ "$FORCE" = 0 ] && [ "$REMOTE" = "$LAST" ]; then
+  echo "Up to date at ${REMOTE:0:7}"
+  exit 0
+fi
+
+git reset --hard --quiet "$REMOTE"
+echo "[$(date -Is)] deploying ${REMOTE:0:7}" | tee -a "$LOG"
+TAG=$(git rev-parse --short HEAD) ./deploy/deploy.sh 2>&1 | tee -a "$LOG"
+echo "$REMOTE" > "$STATE"
+echo "[$(date -Is)] deployed ${REMOTE:0:7}" | tee -a "$LOG"

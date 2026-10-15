@@ -1,0 +1,7 @@
+name             'raktsetu_ci'
+maintainer       'RaktSetu'
+license          'MIT'
+description      'Configures the RaktSetu CI/build node: Docker, deploy user, hardening, and an auto-deploy timer that ships to Elastic Beanstalk'
+version          '1.0.0'
+chef_version     '>= 17'
+supports         'amazon', '>= 2023'
